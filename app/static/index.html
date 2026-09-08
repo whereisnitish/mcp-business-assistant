@@ -18,6 +18,13 @@
 -->
 <style>
   :root {
+    /* Light theme, applied regardless of the operating system's preference.
+       `color-scheme: light` matters as much as the custom properties below: without
+       it a machine set to dark mode still renders the textarea, scrollbars, focus
+       rings and text selection in dark chrome, which looks broken against a light
+       page. It tells the browser to use light form controls too. */
+    color-scheme: light;
+
     --bg: #f6f7f9;
     --panel: #ffffff;
     --ink: #16191d;
@@ -33,15 +40,6 @@
     --risk-bg: #fef2f2;
     --radius: 10px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115; --panel: #171a20; --ink: #e6e8ec; --muted: #949cab;
-      --line: #262b33; --accent: #818cf8; --accent-soft: #1e1b3a;
-      --read: #34d399; --read-bg: #052e22;
-      --write: #fbbf24; --write-bg: #2e2408;
-      --risk: #f87171; --risk-bg: #331414;
-    }
   }
   * { box-sizing: border-box; }
   body {
