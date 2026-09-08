@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Business Assistant</title>
+<!--
+  Single-file console for the MCP Business Assistant.
+
+  No build step and no dependencies: one file that talks to the same public API
+  documented at /docs, so it cannot drift from the backend or rot when a toolchain
+  moves on.
+
+  Security note: every value that originates from the model, a tool result or the
+  database is inserted with textContent, never innerHTML. Tool output is untrusted
+  input -- a lead's "notes" field is attacker-controllable in a real deployment --
+  and this is the same reasoning that keeps the permission engine out of the prompt.
+-->
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #16191d;
+    --muted: #5f6773;
+    --line: #e3e6ea;
+    --accent: #4338ca;
+    --accent-soft: #eef2ff;
+    --read: #047857;
+    --read-bg: #ecfdf5;
+    --write: #b45309;
+    --write-bg: #fffbeb;
+    --risk: #b91c1c;
+    --risk-bg: #fef2f2;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a20; --ink: #e6e8ec; --muted: #949cab;
+      --line: #262b33; --accent: #818cf8; --accent-soft: #1e1b3a;
+      --read: #34d399; --read-bg: #052e22;
+      --write: #fbbf24; --write-bg: #2e2408;
+      --risk: #f87171; --risk-bg: #331414;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+
+  /* ---------------------------------------------------------------- header -- */
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  .spacer { flex: 1; }
+  .pill {
+    font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .pill.ok { color: var(--read); background: var(--read-bg); border-color: transparent; }
+  .pill.warn { color: var(--write); background: var(--write-bg); border-color: transparent; }
+  .pill.bad { color: var(--risk); background: var(--risk-bg); border-color: transparent; }
+  header a { color: var(--accent); font-size: 12.5px; text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+
+  /* ----------------------------------------------------------------- layout -- */
+  main { flex: 1; display: grid; grid-template-columns: 1fr 310px; min-height: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { display: none; } }
+
+  /* ------------------------------------------------------------------- chat -- */
+  #chat { display: flex; flex-direction: column; min-height: 0; }
+  #log { flex: 1; overflow-y: auto; padding: 22px; scroll-behavior: smooth; }
+  .turn { max-width: 760px; margin: 0 auto 18px; }
+  .who { font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+         color: var(--muted); margin-bottom: 5px; }
+  .bubble {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 12px 14px; white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .turn.user .bubble { background: var(--accent-soft); border-color: transparent; }
+  .turn.error .bubble { background: var(--risk-bg); border-color: transparent; color: var(--risk); }
+
+  .meta { margin-top: 7px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .chip {
+    font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 6px;
+    background: var(--bg); border: 1px solid var(--line); color: var(--muted);
+  }
+  .chip.read { color: var(--read); background: var(--read-bg); border-color: transparent; }
+  .chip.write { color: var(--write); background: var(--write-bg); border-color: transparent; }
+  .chip.high_risk { color: var(--risk); background: var(--risk-bg); border-color: transparent; }
+  .timing { font-size: 11px; color: var(--muted); }
+
+  /* --------------------------------------------------------------- approval -- */
+  .approval {
+    margin-top: 10px; border: 1px solid var(--risk); border-radius: var(--radius);
+    background: var(--risk-bg); overflow: hidden;
+  }
+  .approval .head {
+    padding: 9px 14px; font-weight: 650; font-size: 13px; color: var(--risk);
+    border-bottom: 1px solid rgba(185,28,28,.25); display: flex; gap: 8px; align-items: center;
+  }
+  .approval .body { padding: 13px 14px; background: var(--panel); }
+  .approval .why { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
+  .field { margin-bottom: 9px; }
+  .field .label {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 3px;
+  }
+  .field .value { font-size: 13.5px; overflow-wrap: anywhere; }
+  .field pre {
+    margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 7px;
+    padding: 9px 11px; max-height: 190px; overflow: auto;
+  }
+  .actions { display: flex; gap: 9px; margin-top: 13px; align-items: center; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 13.5px; font-weight: 600; padding: 8px 16px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+    color: var(--ink); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.approve { background: var(--risk); border-color: var(--risk); color: #fff; }
+  button.approve:hover:not(:disabled) { filter: brightness(1.1); }
+  .outcome { font-size: 12.5px; font-weight: 600; }
+
+  /* --------------------------------------------------------------- composer -- */
+  #composer { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 20px; }
+  #composer .row { max-width: 760px; margin: 0 auto; display: flex; gap: 9px; }
+  #input {
+    flex: 1; font: inherit; padding: 10px 13px; border-radius: 9px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); resize: none;
+    max-height: 140px;
+  }
+  #input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #send { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+  .suggestions { max-width: 760px; margin: 9px auto 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  .suggestions button {
+    font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: 999px; color: var(--muted);
+  }
+
+  /* ---------------------------------------------------------------- sidebar -- */
+  aside {
+    background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px;
+  }
+  aside h2 {
+    font-size: 11.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 4px;
+  }
+  aside .hint { font-size: 12px; color: var(--muted); margin: 0 0 14px; line-height: 1.45; }
+  .server { margin-bottom: 14px; }
+  .server .name {
+    font-family: var(--mono); font-size: 11.5px; font-weight: 700; color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .tool {
+    display: flex; align-items: center; gap: 7px; padding: 4px 7px; border-radius: 6px;
+    font-family: var(--mono); font-size: 11.5px; margin-bottom: 2px; border: 1px solid transparent;
+  }
+  .tool.used { border-color: var(--accent); background: var(--accent-soft); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.read { background: var(--read); }
+  .dot.write { background: var(--write); }
+  .dot.high_risk { background: var(--risk); }
+  .tool .lock { margin-left: auto; font-size: 10px; }
+  .legend { border-top: 1px solid var(--line); padding-top: 12px; font-size: 11.5px; color: var(--muted); }
+  .legend div { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+
+  .spinner {
+    width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite; display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner { animation: none; } #log { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>MCP Business Assistant</h1>
+  <span class="sub">Tools discovered over the Model Context Protocol</span>
+  <div class="spacer"></div>
+  <span id="stat-tools" class="pill">connecting…</span>
+  <span id="stat-llm" class="pill">…</span>
+  <span id="stat-health" class="pill">…</span>
+  <a href="/docs" target="_blank" rel="noopener">API docs ↗</a>
+</header>
+
+<main>
+  <section id="chat">
+    <div id="log" aria-live="polite"></div>
+
+    <div id="composer">
+      <div class="row">
+        <textarea id="input" rows="1" placeholder="Ask about leads, tasks, sales, your calendar or email…"></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div class="suggestions" id="suggestions"></div>
+    </div>
+  </section>
+
+  <aside>
+    <h2>Discovered tools</h2>
+    <p class="hint">
+      Fetched at runtime from the connected MCP servers — nothing here is hard-coded
+      in the agent. Permission levels are assigned by the backend, not by the servers.
+    </p>
+    <div id="tools"></div>
+    <div class="legend">
+      <div><span class="dot read"></span> Read — runs automatically</div>
+      <div><span class="dot write"></span> Write — changes business data</div>
+      <div><span class="dot high_risk"></span> High risk — 🔒 needs your approval</div>
+    </div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const API = "/api/v1";
+  const log = document.getElementById("log");
+  const input = document.getElementById("input");
+  const sendBtn = document.getElementById("send");
+
+  let conversationId = null;
+  let busy = false;
+
+  const SUGGESTIONS = [
+    "What tasks are overdue?",
+    "Show me today's meetings",
+    "Show me qualified leads",
+    "How much revenue did we make this month?",
+    "Generate the weekly report",
+    "Send a follow-up email to qualified leads",
+  ];
+
+  // ------------------------------------------------------------------ utils --
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    // textContent, never innerHTML: this data comes from the model and from tool
+    // results, both of which are untrusted.
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  };
+
+  const scroll = () => { log.scrollTop = log.scrollHeight; };
+
+  async function api(method, path, payload) {
+    const response = await fetch(API + path, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = body.error || {};
+      throw new Error(error.message || `Request failed (${response.status})`);
+    }
+    return body;
+  }
+
+  // ----------------------------------------------------------------- render --
+  function addTurn(role, text, cssClass) {
+    const turn = el("div", `turn ${cssClass || role}`);
+    turn.appendChild(el("div", "who", role));
+    turn.appendChild(el("div", "bubble", text));
+    log.appendChild(turn);
+    scroll();
+    return turn;
+  }
+
+  function addToolChips(turn, tools, iterations, durationMs) {
+    if (!tools?.length && durationMs === undefined) return;
+    const meta = el("div", "meta");
+    (tools || []).forEach((name) => {
+      const chip = el("span", `chip ${permissionOf(name)}`, name);
+      meta.appendChild(chip);
+    });
+    if (durationMs !== undefined) {
+      const steps = iterations ? `${iterations} step${iterations === 1 ? "" : "s"} · ` : "";
+      meta.appendChild(el("span", "timing", `${steps}${Math.round(durationMs)} ms`));
+    }
+    turn.appendChild(meta);
+    highlightUsed(tools || []);
+    scroll();
+  }
+
+  function addApprovalCard(turn, approval) {
+    const card = el("div", "approval");
+
+    const head = el("div", "head");
+    head.appendChild(el("span", null, "🔒"));
+    head.appendChild(el("span", null, "Approval required — nothing has been sent"));
+    card.appendChild(head);
+
+    const body = el("div", "body");
+    body.appendChild(el("p", "why", approval.risk_reason));
+
+    const args = approval.arguments || {};
+    addField(body, "Tool", approval.tool_name);
+    if (Array.isArray(args.to)) {
+      addField(body, `Recipients (${args.to.length})`, args.to.join(", "));
+    }
+    if (args.subject) addField(body, "Subject", args.subject);
+    if (args.title) addField(body, "Title", args.title);
+    if (args.body) addField(body, "Message", args.body, true);
+
+    const actions = el("div", "actions");
+    const approve = el("button", "approve", "Approve and send");
+    const reject = el("button", null, "Reject");
+    const outcome = el("span", "outcome");
+
+    const finish = (message, colour) => {
+      approve.remove();
+      reject.remove();
+      outcome.textContent = message;
+      outcome.style.color = colour;
+    };
+
+    approve.onclick = async () => {
+      approve.disabled = reject.disabled = true;
+      outcome.textContent = "Executing…";
+      try {
+        const result = await api("POST", `/approvals/${approval.approval_id}/confirm`, {
+          note: "Approved from the web console",
+        });
+        finish(result.executed ? "✓ Executed" : "✗ Failed", result.executed ? "var(--read)" : "var(--risk)");
+        addTurn("assistant", result.response || "Done.");
+      } catch (error) {
+        approve.disabled = reject.disabled = false;
+        outcome.textContent = error.message;
+        outcome.style.color = "var(--risk)";
+      }
+    };
+
+    reject.onclick = async () => {
+      approve.disabled = reject.disabled = true;
+      try {
+        await api("POST", `/approvals/${approval.approval_id}/reject`, { note: "Rejected from the web console" });
+        finish("✗ Rejected — the action was never performed", "var(--muted)");
+      } catch (error) {
+        outcome.textContent = error.message;
+        outcome.style.color = "var(--risk)";
+      }
+    };
+
+    actions.append(approve, reject, outcome);
+    body.appendChild(actions);
+    card.appendChild(body);
+    turn.appendChild(card);
+    scroll();
+  }
+
+  function addField(parent, label, value, preformatted) {
+    const field = el("div", "field");
+    field.appendChild(el("div", "label", label));
+    field.appendChild(preformatted ? el("pre", null, value) : el("div", "value", value));
+    parent.appendChild(field);
+  }
+
+  // ------------------------------------------------------------------ tools --
+  const permissions = new Map();
+
+  function permissionOf(qualifiedName) {
+    return permissions.get(qualifiedName) || "";
+  }
+
+  function highlightUsed(used) {
+    document.querySelectorAll(".tool").forEach((node) => {
+      node.classList.toggle("used", used.includes(node.dataset.tool));
+    });
+  }
+
+  async function loadTools() {
+    const container = document.getElementById("tools");
+    try {
+      const data = await api("GET", "/tools");
+      container.textContent = "";
+      permissions.clear();
+
+      const byServer = new Map();
+      data.tools.forEach((tool) => {
+        permissions.set(tool.name, tool.permission);
+        if (!byServer.has(tool.server)) byServer.set(tool.server, []);
+        byServer.get(tool.server).push(tool);
+      });
+
+      [...byServer.entries()].sort().forEach(([server, tools]) => {
+        const group = el("div", "server");
+        group.appendChild(el("div", "name", server));
+        tools.forEach((tool) => {
+          const row = el("div", `tool ${tool.permission}`);
+          row.dataset.tool = tool.name;
+          row.title = tool.description;
+          row.appendChild(el("span", `dot ${tool.permission}`));
+          row.appendChild(el("span", null, tool.name.split("__")[1]));
+          if (tool.requires_approval) row.appendChild(el("span", "lock", "🔒"));
+          group.appendChild(row);
+        });
+        container.appendChild(group);
+      });
+
+      document.getElementById("stat-tools").textContent =
+        `${data.count} tools · ${data.servers.length} servers`;
+      document.getElementById("stat-tools").className = "pill ok";
+    } catch {
+      container.textContent = "Could not load the tool catalog.";
+    }
+  }
+
+  async function loadHealth() {
+    const health = document.getElementById("stat-health");
+    const llm = document.getElementById("stat-llm");
+    try {
+      const data = await fetch("/health").then((r) => r.json());
+      health.textContent = data.status === "ok" ? "healthy" : data.status;
+      health.className = `pill ${data.status === "ok" ? "ok" : "warn"}`;
+      llm.textContent = data.llm_is_mock
+        ? `${data.llm_provider} (dev mock)`
+        : data.llm_provider;
+      llm.className = `pill ${data.llm_is_mock ? "warn" : "ok"}`;
+      llm.title = data.llm_is_mock
+        ? "Rule-based development provider — deterministic, no API key. Set LLM_PROVIDER=openai for a real model."
+        : "A real language model is answering.";
+    } catch {
+      health.textContent = "unreachable";
+      health.className = "pill bad";
+    }
+  }
+
+  // ------------------------------------------------------------------- send --
+  async function send(text) {
+    if (busy || !text.trim()) return;
+    busy = true;
+    sendBtn.disabled = true;
+    input.value = "";
+    input.style.height = "auto";
+
+    addTurn("you", text, "user");
+
+    const pending = el("div", "turn assistant");
+    pending.appendChild(el("div", "who", "assistant"));
+    const bubble = el("div", "bubble");
+    bubble.appendChild(el("span", "spinner"));
+    bubble.appendChild(el("span", null, "  thinking…"));
+    pending.appendChild(bubble);
+    log.appendChild(pending);
+    scroll();
+
+    try {
+      const payload = { message: text };
+      if (conversationId) payload.conversation_id = conversationId;
+      const data = await api("POST", "/chat", payload);
+
+      conversationId = data.conversation_id;
+      pending.remove();
+
+      const turn = addTurn("assistant", data.response);
+      addToolChips(turn, data.tools_called, data.iterations, data.duration_ms);
+      if (data.approval_required && data.approval) addApprovalCard(turn, data.approval);
+    } catch (error) {
+      pending.remove();
+      addTurn("assistant", error.message, "error");
+    } finally {
+      busy = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  // ------------------------------------------------------------------- init --
+  SUGGESTIONS.forEach((text) => {
+    const button = el("button", null, text);
+    button.onclick = () => send(text);
+    document.getElementById("suggestions").appendChild(button);
+  });
+
+  sendBtn.onclick = () => send(input.value);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      send(input.value);
+    }
+  });
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  });
+
+  addTurn(
+    "assistant",
+    "I can look up leads, track tasks, report on sales, check your calendar and draft " +
+      "email.\n\nActions that cannot be undone — sending email, booking a meeting — stop " +
+      "and ask for your approval first. Try the last suggestion below to see that happen."
+  );
+
+  loadHealth();
+  loadTools();
+  input.focus();
+})();
+</script>
+</body>
+</html>

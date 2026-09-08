@@ -306,6 +306,48 @@ class TestErrorContract:
         assert body["request_id"]
 
 
+class TestWebConsole:
+    async def test_the_console_is_served_at_the_root(self, api_client: AsyncClient) -> None:
+        response = await api_client.get("/")
+
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert "MCP Business Assistant" in response.text
+
+    async def test_the_console_is_not_cached(self, api_client: AsyncClient) -> None:
+        """One unhashed file: a cached copy would survive a redeploy."""
+        response = await api_client.get("/")
+        assert response.headers["cache-control"] == "no-store"
+
+    async def test_the_json_descriptor_moved_to_api(self, api_client: AsyncClient) -> None:
+        body = (await api_client.get("/api")).json()
+        assert body["docs"] == "/docs"
+        assert body["health"] == "/health"
+
+    async def test_the_console_uses_only_public_endpoints(self, api_client: AsyncClient) -> None:
+        """It must not depend on anything undocumented, or the two will drift.
+
+        The page composes URLs from a base constant, so this checks that the base and
+        each composed endpoint it calls are genuinely part of the published contract.
+        """
+        page = (await api_client.get("/")).text
+        documented = set((await api_client.get("/openapi.json")).json()["paths"])
+
+        assert '"/api/v1"' in page, "the console should build on the documented prefix"
+
+        for fragment, full_path in (
+            ('"/chat"', "/api/v1/chat"),
+            ('"/tools"', "/api/v1/tools"),
+        ):
+            assert fragment in page
+            assert full_path in documented
+
+        # Approvals are addressed by id, so match the templated form.
+        assert "/approvals/${" in page
+        assert "/api/v1/approvals/{approval_id}/confirm" in documented
+        assert "/api/v1/approvals/{approval_id}/reject" in documented
+
+
 class TestOpenAPI:
     async def test_schema_documents_every_public_route(self, api_client: AsyncClient) -> None:
         paths = (await api_client.get("/openapi.json")).json()["paths"]

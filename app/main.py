@@ -20,9 +20,12 @@ from __future__ import annotations
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api.errors import register_exception_handlers
@@ -219,16 +222,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(conversations.router, prefix=prefix)
     app.include_router(tools.router, prefix=prefix)
 
-    @app.get("/", include_in_schema=False)
-    async def root() -> dict[str, str]:
-        return {
-            "name": settings.app_name,
-            "version": __version__,
-            "docs": "/docs",
-            "health": "/health",
-        }
+    _mount_web_console(app, settings)
 
     return app
+
+
+def _mount_web_console(app: FastAPI, settings: Settings) -> None:
+    """Serve the single-page console at ``/``.
+
+    A small operator UI over the same public API documented at ``/docs`` -- it uses
+    no private endpoint, so it cannot drift from the backend contract.
+
+    Mounting is conditional: if the directory is absent (a trimmed deployment that
+    ships only the API, say) the service still starts and ``/`` returns the JSON
+    descriptor instead. A missing static directory should not take an API down.
+    """
+    static_dir = Path(__file__).parent / "static"
+    index_file = static_dir / "index.html"
+
+    descriptor = {
+        "name": settings.app_name,
+        "version": __version__,
+        "docs": "/docs",
+        "health": "/health",
+        "tools": f"{settings.api_v1_prefix}/tools",
+    }
+
+    if not index_file.is_file():
+        logger.info(
+            "web console not bundled; serving the JSON descriptor at /",
+            extra=safe_extra({"event": "app.no_web_console"}),
+        )
+
+        @app.get("/", include_in_schema=False)
+        async def root_descriptor() -> dict[str, str]:
+            return descriptor
+
+        return
+
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def web_console() -> FileResponse:
+        # no-store: the console is one file with no content hash in its name, so a
+        # cached copy would silently survive a redeploy.
+        return FileResponse(index_file, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api", include_in_schema=False)
+    async def root_json() -> dict[str, str]:
+        """The JSON descriptor that used to live at ``/``."""
+        return descriptor
 
 
 app = create_app()

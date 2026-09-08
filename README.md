@@ -16,13 +16,14 @@ cd mcp-business-assistant
 docker compose up --build          # no API key required
 ```
 
-Then open <http://localhost:8000/docs>.
+Then open <http://localhost:8000> for the web console, or
+<http://localhost:8000/docs> for the API reference.
 
 [![Python](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-2.2-purple.svg)](https://modelcontextprotocol.io/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.141-009688.svg)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-1.2-orange.svg)](https://langchain-ai.github.io/langgraph/)
-[![Tests](https://img.shields.io/badge/tests-254%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-258%20passing-brightgreen.svg)](#testing)
 [![Coverage](https://img.shields.io/badge/coverage-84%25-brightgreen.svg)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
@@ -42,6 +43,7 @@ Then open <http://localhost:8000/docs>.
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Docker](#docker)
+- [Web console](#web-console)
 - [API reference](#api-reference)
 - [Worked example](#worked-example)
 - [Testing](#testing)
@@ -86,7 +88,9 @@ sent until a human confirms.
   default, with a working HubSpot CRM integration and a real SMTP email provider.
 - **Full audit trail** of every decision, tool call, result and approval event, with
   credentials redacted before they can be written.
-- **254 tests, 84% coverage**, no API key and no network required.
+- **A web console at `/`** that makes the approval workflow visible — approve or
+  reject a pending action from the browser.
+- **258 tests, 84% coverage**, no API key and no network required.
 
 ## Why MCP
 
@@ -324,7 +328,7 @@ Full reasoning: **[docs/security.md](docs/security.md)**.
 | Validation | **Pydantic 2.13** | One model serves tool schema, API contract and validation |
 | Persistence | **SQLAlchemy 2.0** (async) + **PostgreSQL 16** | Typed ORM; portable types let tests run on SQLite |
 | LLM | **OpenAI SDK 3.8** behind an interface | Swappable providers; no SDK leaks past the boundary |
-| Tests | **pytest 9** + pytest-asyncio | 254 deterministic tests, no credentials |
+| Tests | **pytest 9** + pytest-asyncio | 258 deterministic tests, no credentials |
 | Packaging | **Docker** multi-stage, non-root | Small runtime image, unprivileged agent process |
 
 ## Project structure
@@ -361,6 +365,7 @@ mcp-business-assistant/
 │   ├── models/                # database/ (ORM) + schemas/ (DTOs, API)
 │   ├── repositories/          # all SQL lives here
 │   ├── core/                  # config, logging, security, exceptions
+│   ├── static/                # single-page web console (no build step)
 │   ├── db/                    # engine, session, types, seed
 │   └── main.py                # app factory + lifespan
 ├── mcp_servers/               # 5 independently runnable MCP servers
@@ -456,6 +461,41 @@ docker compose --profile http up --build
 The image is multi-stage, runs as a non-root user, and has a healthcheck against
 `/health`.
 
+## Web console
+
+A single-page operator console is served at **`/`**. No build step and no
+dependencies -- one file (`app/static/index.html`) talking to the same public API
+documented at `/docs`, so it cannot drift from the backend.
+
+```text
+┌─────────────────────────────────────────────┬──────────────────────┐
+│  17 tools · 5 servers   heuristic (dev mock)│  DISCOVERED TOOLS    │
+├─────────────────────────────────────────────┤  crm                 │
+│  YOU                                        │   ● get_leads        │
+│  Send a follow-up email to qualified leads  │   ● create_lead      │
+│                                             │  email               │
+│  ASSISTANT                                  │   ● draft_email      │
+│  I have prepared this action…               │   ● send_email    🔒 │
+│  [crm__get_leads] [email__draft_email]      │                      │
+│  [email__send_email]      3 steps · 570 ms  │  ● read              │
+│  ┌───────────────────────────────────────┐  │  ● write             │
+│  │ 🔒 Approval required — nothing sent   │  │  ● high risk  🔒     │
+│  │ To: grace@navsys.mil, ada@analytical… │  │                      │
+│  │ Subject: Following up on your interest│  │                      │
+│  │ [ Approve and send ]   [ Reject ]     │  │                      │
+│  └───────────────────────────────────────┘  │                      │
+└─────────────────────────────────────────────┴──────────────────────┘
+```
+
+It exists to make the security model visible rather than described: the assistant
+stops, shows the **exact** recipients and body awaiting a decision, and the message
+is sent only when you click. Tools used in the last turn light up in the sidebar,
+colour-coded by the permission level the backend assigned them.
+
+Every value that originates from the model, a tool result or the database is inserted
+with `textContent`, never `innerHTML` — tool output is untrusted input, and the same
+reasoning that keeps the permission engine out of the prompt applies to the DOM.
+
 ## API reference
 
 Interactive docs at `/docs`; OpenAPI JSON at `/openapi.json`.
@@ -472,6 +512,7 @@ Interactive docs at `/docs`; OpenAPI JSON at `/openapi.json`.
 | `GET` | `/api/v1/tools` | The live discovered catalog |
 | `GET` | `/api/v1/tools/permissions` | The permission model as configured |
 | `GET` | `/health` | Database + per-server MCP health |
+| `GET` | `/` | Web console (single page) |
 
 Every response carries `X-Request-ID`; errors use one shape:
 
@@ -561,7 +602,7 @@ curl -s -X POST localhost:8000/api/v1/chat -H 'Content-Type: application/json' \
 ## Testing
 
 ```bash
-pytest                      # 246 tests, ~30s, no credentials, no network
+pytest                      # 250 tests, ~30s, no credentials, no network
                             # (the 8 subprocess tests are opt-in; see -m slow)
 pytest -m unit              # fast units only
 pytest -m slow              # + MCP servers as real subprocesses
@@ -571,7 +612,7 @@ pytest --cov=app --cov=mcp_servers
 | Suite | Count | What it covers |
 |---|---|---|
 | `unit` | 176 | Permissions, policy, approvals, redaction, hashing, repositories, providers, schema validation |
-| `integration` | 70 | Real MCP servers, the agent loop, the ASGI app, the approval workflow |
+| `integration` | 74 | Real MCP servers, the agent loop, the ASGI app, the approval workflow |
 | `slow` | 8 | Real subprocess transport + per-server credential isolation |
 | `live` | opt-in | HubSpot / SMTP against real credentials (deselected by default) |
 
