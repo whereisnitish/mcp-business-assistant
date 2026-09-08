@@ -23,7 +23,11 @@ coverage.xml
 
 # Runtime artifacts
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 data/
 logs/
 
