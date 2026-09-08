@@ -1,0 +1,107 @@
+# =============================================================================
+# `docker compose up --build` brings up a working assistant with no credentials:
+# PostgreSQL plus the API, which launches the five MCP servers as stdio
+# subprocesses and drives them with the deterministic heuristic LLM provider.
+#
+# Set LLM_PROVIDER=openai and LLM_API_KEY in your .env to use a real model.
+# =============================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: mba-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mcp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcp}
+      POSTGRES_DB: ${POSTGRES_DB:-mcp_assistant}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      # The API waits for this before starting, so it never races the database.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcp} -d ${POSTGRES_DB:-mcp_assistant}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mba-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mcp}:${POSTGRES_PASSWORD:-mcp}@db:5432/${POSTGRES_DB:-mcp_assistant}
+      # Defaults keep the demo credential-free; .env overrides win where set.
+      LLM_PROVIDER: ${LLM_PROVIDER:-heuristic}
+      MCP_TRANSPORT: ${MCP_TRANSPORT:-stdio}
+      AUTO_CREATE_SCHEMA: ${AUTO_CREATE_SCHEMA:-true}
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      # Mock email outbox stays inspectable from the host.
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  # ---------------------------------------------------------------------------
+  # OPTIONAL: run the MCP servers as independent HTTP services instead of stdio
+  # subprocesses. This is what a real deployment looks like when tool servers are
+  # owned by different teams and scaled separately.
+  #
+  #   docker compose --profile http up --build
+  #   (with MCP_TRANSPORT=http and MCP_HTTP_BASE_URL=http://mcp-crm:9000 ...)
+  # ---------------------------------------------------------------------------
+  mcp-crm:
+    profiles: ["http"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mba-mcp-crm
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mcp}:${POSTGRES_PASSWORD:-mcp}@db:5432/${POSTGRES_DB:-mcp_assistant}
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: "9000"
+    command: ["python", "-m", "mcp_servers.crm_server", "--transport", "http", "--port", "9000"]
+    ports:
+      - "9001:9000"
+
+  mcp-tasks:
+    profiles: ["http"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mba-mcp-tasks
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mcp}:${POSTGRES_PASSWORD:-mcp}@db:5432/${POSTGRES_DB:-mcp_assistant}
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: "9000"
+    command: ["python", "-m", "mcp_servers.task_server", "--transport", "http", "--port", "9000"]
+    ports:
+      - "9002:9000"
+
+volumes:
+  postgres_data:
+    driver: local
